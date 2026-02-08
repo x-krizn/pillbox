@@ -1,0 +1,707 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#000000">
+    <title>Pillbox</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: #000;
+            color: #0f0;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            overflow: hidden;
+            height: 100vh;
+        }
+        
+        #container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            padding: 10px;
+        }
+        
+        #output {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin-bottom: 10px;
+        }
+        
+        #input-line {
+            display: flex;
+            align-items: center;
+        }
+        
+        #prompt {
+            color: #0ff;
+            margin-right: 5px;
+        }
+        
+        #input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #0f0;
+            font-family: inherit;
+            font-size: inherit;
+            outline: none;
+        }
+        
+        .error {
+            color: #f00;
+        }
+        
+        .warning {
+            color: #ff0;
+        }
+        
+        .success {
+            color: #0f0;
+        }
+        
+        .info {
+            color: #0ff;
+        }
+        
+        #editor-container {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #000;
+            flex-direction: column;
+            padding: 10px;
+            z-index: 1000;
+        }
+        
+        #editor-container.active {
+            display: flex;
+        }
+        
+        #editor-header {
+            color: #0ff;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #0ff;
+        }
+        
+        #editor-textarea {
+            flex: 1;
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            font-family: inherit;
+            font-size: inherit;
+            padding: 10px;
+            resize: none;
+            outline: none;
+        }
+        
+        #editor-footer {
+            color: #0ff;
+            margin-top: 10px;
+            padding-top: 5px;
+            border-top: 1px solid #0ff;
+            font-size: 12px;
+        }
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #000;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #0f0;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="output"></div>
+        <div id="input-line">
+            <span id="prompt">></span>
+            <input type="text" id="input" autocomplete="off" spellcheck="false">
+        </div>
+    </div>
+    
+    <div id="editor-container">
+        <div id="editor-header">
+            <span id="editor-filename"></span>
+            <span style="float: right;">ESC: save and exit | CTRL+Q: exit without saving</span>
+        </div>
+        <textarea id="editor-textarea" spellcheck="false"></textarea>
+        <div id="editor-footer">Lines: <span id="editor-lines">0</span> | Characters: <span id="editor-chars">0</span></div>
+    </div>
+
+    <script type="module">
+        // ====================================================================
+        // PILLBOX BOOT SYSTEM
+        // ====================================================================
+        
+        // Import core modules
+        import VFS from './modules/vfs.js';
+        import Shell from './modules/shell.js';
+        import EditorModule from './modules/editor.js';
+        
+        class Pillbox {
+            constructor() {
+                this.output = document.getElementById('output');
+                this.input = document.getElementById('input');
+                this.editorContainer = document.getElementById('editor-container');
+                this.editorTextarea = document.getElementById('editor-textarea');
+                this.editorFilename = document.getElementById('editor-filename');
+                this.editorLines = document.getElementById('editor-lines');
+                this.editorChars = document.getElementById('editor-chars');
+                
+                this.vfs = null;
+                this.bootLog = [];
+                this.loadedModules = new Set();
+                this.currentEditFile = null;
+                this.db = null;
+                this.useMemory = false;
+                
+                this.init();
+            }
+            
+            async init() {
+                this.print('[initializing....]', 'info');
+                await this.sleep(300);
+                
+                // Initialize core modules
+                this.vfsModule = new VFS();
+                this.shellModule = new Shell();
+                this.editorModule = new EditorModule();
+                
+                await this.initStorage();
+                await this.loadVFS();
+                
+                this.print('[loading modules....]', 'info');
+                await this.sleep(200);
+                
+                // Initialize VFS module
+                const vfsResult = await this.vfsModule.init();
+                if (vfsResult.warning) {
+                    this.log(`VFS Warning: ${vfsResult.warning}`);
+                }
+                
+                await this.scanModules();
+                
+                this.setupInput();
+                this.setupEditor();
+                this.registerServiceWorker();
+                
+                this.log('Boot complete');
+                this.print('\n[CORE MODULES LOADED]\n', 'success');
+                this.print('  ✓ vfs.js (Virtual File System)\n', 'success');
+                this.print('  ✓ shell.js (Shell Environment)\n', 'success');
+                this.print('  ✓ editor.js (Editor Module)\n', 'success');
+                this.print('\nType "help" for commands\n', 'info');
+                this.input.focus();
+            }
+            
+            async initStorage() {
+                try {
+                    this.db = await this.openDB();
+                    this.useMemory = false;
+                } catch (e) {
+                    this.useMemory = true;
+                    this.vfs = {};
+                    this.print('[WARNING: Using in-memory storage]', 'warning');
+                }
+            }
+            
+            openDB() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open('PillboxDB', 1);
+                    
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => resolve(request.result);
+                    
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('files')) {
+                            db.createObjectStore('files');
+                        }
+                        if (!db.objectStoreNames.contains('logs')) {
+                            db.createObjectStore('logs');
+                        }
+                    };
+                });
+            }
+            
+            async loadVFS() {
+                if (this.useMemory) {
+                    return;
+                }
+                
+                try {
+                    const tx = this.db.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const request = store.getAll();
+                    
+                    const files = await new Promise((resolve, reject) => {
+                        request.onsuccess = () => resolve(request.result);
+                        request.onerror = () => reject(request.error);
+                    });
+                    
+                    this.vfs = {};
+                    for (const file of files) {
+                        if (file && file.path && file.content !== undefined) {
+                            this.vfs[file.path] = file.content;
+                        }
+                    }
+                } catch (e) {
+                    this.vfs = {};
+                    this.useMemory = true;
+                    this.print('[ERROR: Failed to load VFS, using memory]', 'error');
+                }
+            }
+            
+            async saveFile(path, content) {
+                this.vfs[path] = content;
+                
+                if (this.useMemory) {
+                    return;
+                }
+                
+                try {
+                    const tx = this.db.transaction(['files'], 'readwrite');
+                    const store = tx.objectStore('files');
+                    await new Promise((resolve, reject) => {
+                        const request = store.put({ path, content }, path);
+                        request.onsuccess = () => resolve();
+                        request.onerror = () => reject(request.error);
+                    });
+                } catch (e) {
+                    this.print('[ERROR: Failed to save to IndexedDB]', 'error');
+                }
+            }
+            
+            async deleteFile(path) {
+                delete this.vfs[path];
+                
+                if (this.useMemory) {
+                    return;
+                }
+                
+                try {
+                    const tx = this.db.transaction(['files'], 'readwrite');
+                    const store = tx.objectStore('files');
+                    await new Promise((resolve, reject) => {
+                        const request = store.delete(path);
+                        request.onsuccess = () => resolve();
+                        request.onerror = () => reject(request.error);
+                    });
+                } catch (e) {
+                    this.print('[ERROR: Failed to delete from IndexedDB]', 'error');
+                }
+            }
+            
+            
+            async scanModules() {
+                this.print('\n[USER MODULES]\n', 'info');
+                
+                const files = Object.keys(this.vfs).sort();
+                
+                if (files.length === 0) {
+                    this.print('No user modules found\n', 'warning');
+                    this.print('Use "edit <filename>" to create new modules\n', 'info');
+                    return;
+                }
+                
+                for (let i = 0; i < files.length; i++) {
+                    const filename = files[i];
+                    const status = this.verifyModule(filename);
+                    const symbol = status.valid ? '✓' : 'X';
+                    const className = status.valid ? 'success' : 'error';
+                    
+                    this.print(`[${i + 1}] ${symbol} ${filename}`, className);
+                    
+                    if (!status.valid && status.errors.length > 0) {
+                        for (const err of status.errors) {
+                            this.print(`    ${err}`, 'warning');
+                        }
+                    }
+                    
+                    this.print('\n');
+                }
+            }
+            
+            verifyModule(filename) {
+                const content = this.vfs[filename];
+                const errors = [];
+                
+                if (!content) {
+                    errors.push('File is empty');
+                    return { valid: false, errors };
+                }
+                
+                if (filename.endsWith('.js')) {
+                    // Check for syntax errors
+                    try {
+                        new Function(content);
+                    } catch (e) {
+                        errors.push(`SYNTAX ERROR: ${e.message}`);
+                    }
+                    
+                    // Simple import detection
+                    const importMatches = content.match(/import\s+.*\s+from\s+['"](.+)['"]/g);
+                    if (importMatches) {
+                        for (const match of importMatches) {
+                            const pathMatch = match.match(/from\s+['"](.+)['"]/);
+                            if (pathMatch) {
+                                const importPath = pathMatch[1];
+                                if (importPath.startsWith('./') || importPath.startsWith('../')) {
+                                    const resolvedPath = this.resolvePath(filename, importPath);
+                                    if (!this.vfs[resolvedPath]) {
+                                        errors.push(`MISSING IMPORT: ${importPath}`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                return { valid: errors.length === 0, errors };
+            }
+            
+            resolvePath(base, relative) {
+                const baseParts = base.split('/');
+                baseParts.pop();
+                const relativeParts = relative.split('/');
+                
+                for (const part of relativeParts) {
+                    if (part === '.') continue;
+                    if (part === '..') {
+                        baseParts.pop();
+                    } else {
+                        baseParts.push(part);
+                    }
+                }
+                
+                return baseParts.join('/').replace(/^\//, '');
+            }
+            
+            setupInput() {
+                this.input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        const command = this.input.value.trim();
+                        if (command) {
+                            this.print(`> ${command}\n`, 'info');
+                            this.executeCommand(command);
+                            this.input.value = '';
+                        }
+                    }
+                });
+            }
+            
+            setupEditor() {
+                this.editorTextarea.addEventListener('input', () => {
+                    const text = this.editorTextarea.value;
+                    const lines = text.split('\n').length;
+                    this.editorLines.textContent = lines;
+                    this.editorChars.textContent = text.length;
+                });
+                
+                this.editorTextarea.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        this.saveAndCloseEditor();
+                    } else if (e.ctrlKey && e.key === 'q') {
+                        e.preventDefault();
+                        this.closeEditor();
+                    }
+                });
+            }
+            
+            async executeCommand(cmd) {
+                const parts = cmd.split(' ');
+                const command = parts[0].toLowerCase();
+                const args = parts.slice(1);
+                
+                try {
+                    switch (command) {
+                        case 'help':
+                            this.showHelp();
+                            break;
+                        case 'ls':
+                            await this.scanModules();
+                            break;
+                        case 'load':
+                            await this.loadModules(args);
+                            break;
+                        case 'edit':
+                            this.openEditor(args[0]);
+                            break;
+                        case 'reload':
+                            this.reload();
+                            break;
+                        case 'reset':
+                            await this.reset();
+                            break;
+                        case 'log':
+                            this.showLog();
+                            break;
+                        case 'rm':
+                            await this.removeFile(args[0]);
+                            break;
+                        case 'cat':
+                            this.catFile(args[0]);
+                            break;
+                        case 'clear':
+                            this.output.innerHTML = '';
+                            break;
+                        default:
+                            this.print(`Unknown command: ${command}\n`, 'error');
+                            this.print('Type "help" for available commands\n');
+                    }
+                } catch (e) {
+                    this.print(`[ERROR] ${e.message}\n`, 'error');
+                    this.log(`Command error: ${cmd} - ${e.message}`);
+                }
+            }
+            
+            showHelp() {
+                const help = `
+Available commands:
+
+  help                 Show this help
+  ls                   List user modules and verify status
+  load <n>             Load module(s) by number (e.g., load 1 or load 1,2,3)
+  edit <filename>      Open file in editor (create new module)
+  cat <filename>       Display file contents
+  rm <filename>        Remove file
+  reload               Soft reboot Pillbox
+  reset                Show system info
+  log                  Show boot and error log
+  clear                Clear screen
+
+Core modules (vfs.js, shell.js, editor.js) are external and always loaded.
+Use "edit" to create user modules stored in IndexedDB.
+
+`;
+                this.print(help, 'info');
+            }
+            
+            async loadModules(args) {
+                if (args.length === 0) {
+                    this.print('Usage: load <number> or load <n,n,n>\n', 'error');
+                    return;
+                }
+                
+                const files = Object.keys(this.vfs).sort();
+                const indices = args[0].split(',').map(n => parseInt(n.trim()) - 1);
+                
+                for (const idx of indices) {
+                    if (idx < 0 || idx >= files.length) {
+                        this.print(`[ERROR] Invalid module number: ${idx + 1}\n`, 'error');
+                        continue;
+                    }
+                    
+                    const filename = files[idx];
+                    await this.loadModule(filename);
+                }
+            }
+            
+            async loadModule(filename) {
+                const status = this.verifyModule(filename);
+                
+                if (!status.valid) {
+                    this.print(`[ERROR] Cannot load ${filename}: verification failed\n`, 'error');
+                    for (const err of status.errors) {
+                        this.print(`  ${err}\n`, 'warning');
+                    }
+                    this.log(`Failed to load ${filename}: ${status.errors.join(', ')}`);
+                    return;
+                }
+                
+                this.print(`[LOADING] ${filename}...\n`, 'info');
+                
+                try {
+                    const content = this.vfs[filename];
+                    
+                    if (filename.endsWith('.js')) {
+                        const func = new Function(content);
+                        func();
+                        this.loadedModules.add(filename);
+                        this.print(`[SUCCESS] ${filename} loaded\n`, 'success');
+                        this.log(`Successfully loaded ${filename}`);
+                    } else {
+                        this.print(`[INFO] ${filename} is not a JavaScript module\n`, 'warning');
+                    }
+                } catch (e) {
+                    this.print(`[CRASH] ${filename}: ${e.message}\n`, 'error');
+                    this.log(`Crash loading ${filename}: ${e.message}`);
+                }
+            }
+            
+            openEditor(filename) {
+                if (!filename) {
+                    this.print('[ERROR] Usage: edit <filename>\n', 'error');
+                    return;
+                }
+                
+                this.currentEditFile = filename;
+                const content = this.vfs[filename] || '';
+                
+                this.editorFilename.textContent = filename;
+                this.editorTextarea.value = content;
+                this.editorContainer.classList.add('active');
+                this.editorTextarea.focus();
+                
+                const lines = content.split('\n').length;
+                this.editorLines.textContent = lines;
+                this.editorChars.textContent = content.length;
+            }
+            
+            async saveAndCloseEditor() {
+                if (this.currentEditFile) {
+                    const content = this.editorTextarea.value;
+                    await this.saveFile(this.currentEditFile, content);
+                    this.print(`[SAVED] ${this.currentEditFile}\n`, 'success');
+                    this.log(`Saved file: ${this.currentEditFile}`);
+                }
+                this.closeEditor();
+            }
+            
+            closeEditor() {
+                this.editorContainer.classList.remove('active');
+                this.currentEditFile = null;
+                this.input.focus();
+            }
+            
+            async removeFile(filename) {
+                if (!filename) {
+                    this.print('[ERROR] Usage: rm <filename>\n', 'error');
+                    return;
+                }
+                
+                if (!this.vfs[filename]) {
+                    this.print(`[ERROR] File not found: ${filename}\n`, 'error');
+                    return;
+                }
+                
+                await this.deleteFile(filename);
+                this.print(`[DELETED] ${filename}\n`, 'success');
+                this.log(`Deleted file: ${filename}`);
+            }
+            
+            catFile(filename) {
+                if (!filename) {
+                    this.print('[ERROR] Usage: cat <filename>\n', 'error');
+                    return;
+                }
+                
+                const content = this.vfs[filename];
+                if (!content) {
+                    this.print(`[ERROR] File not found: ${filename}\n`, 'error');
+                    return;
+                }
+                
+                this.print(`\n--- ${filename} ---\n`, 'info');
+                this.print(content + '\n');
+                this.print(`--- end ---\n\n`, 'info');
+            }
+            
+            reload() {
+                this.print('[RELOADING PILLBOX...]\n', 'info');
+                this.log('User initiated reload');
+                setTimeout(() => location.reload(), 500);
+            }
+            
+            async reset() {
+                this.print('[RESET NOTIFICATION]\n', 'warning');
+                this.print('Core modules (vfs.js, shell.js, editor.js) are now external files.\n', 'info');
+                this.print('They cannot be modified through the VFS.\n', 'info');
+                
+                const userFiles = Object.keys(this.vfs);
+                this.print(`\nCurrent user files: ${userFiles.length}\n`, 'info');
+                
+                if (userFiles.length > 0) {
+                    this.print('To clear all user files, use: rm <filename>\n', 'warning');
+                    this.print('User files:\n');
+                    for (const file of userFiles) {
+                        this.print(`  - ${file}\n`);
+                    }
+                }
+                
+                this.log('Reset command executed');
+            }
+            
+            showLog() {
+                this.print('\n[BOOT LOG]\n', 'info');
+                if (this.bootLog.length === 0) {
+                    this.print('No log entries\n');
+                } else {
+                    for (const entry of this.bootLog) {
+                        this.print(`${entry}\n`);
+                    }
+                }
+                this.print('\n');
+            }
+            
+            log(message) {
+                const timestamp = new Date().toISOString();
+                const entry = `[${timestamp}] ${message}`;
+                this.bootLog.push(entry);
+                
+                if (this.bootLog.length > 100) {
+                    this.bootLog.shift();
+                }
+            }
+            
+            print(text, className = '') {
+                const line = document.createElement('span');
+                line.textContent = text;
+                if (className) {
+                    line.className = className;
+                }
+                this.output.appendChild(line);
+                this.output.scrollTop = this.output.scrollHeight;
+            }
+            
+            sleep(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+            
+            registerServiceWorker() {
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('./sw.js')
+                        .then((registration) => {
+                            console.log('[PWA] Service Worker registered:', registration.scope);
+                            this.log('Service Worker registered successfully');
+                        })
+                        .catch((error) => {
+                            console.log('[PWA] Service Worker registration failed:', error);
+                            this.log(`Service Worker registration failed: ${error.message}`);
+                        });
+                }
+            }
+        }
+        
+        // Boot Pillbox on load
+        window.addEventListener('load', () => {
+            new Pillbox();
+        });
+    </script>
+</body>
+</html>
