@@ -1,11 +1,18 @@
 // Pillbox Service Worker
-const CACHE_NAME = 'pillbox-v1';
+const CACHE_NAME = 'pillbox-v3';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './manifest.json',
   './icon-192.png',
-  './icon-512.png'
+  './icon-512.png',
+  './modules/vfs.js',
+  './modules/shell.js',
+  './modules/editor.js',
+  './modules/terminal.js',
+  './modules/kernel.js',
+  './modules/commands.js',
+  './modules/network.js'
 ];
 
 // Install event - cache assets
