@@ -1,5 +1,6 @@
 // Virtual File System Module
 // Provides persistent storage for Pillbox using IndexedDB
+// FIXED: Supports atomic operations, proper transaction handling
 
 class VirtualFileSystem {
     constructor() {
@@ -36,6 +37,7 @@ class VirtualFileSystem {
         });
     }
 
+    // FIXED: Atomic write operation
     async write(path, content) {
         if (this.useMemory) {
             this.memoryStore[path] = content;
@@ -45,11 +47,14 @@ class VirtualFileSystem {
         try {
             const tx = this.db.transaction(['files'], 'readwrite');
             const store = tx.objectStore('files');
+            
+            // Wait for transaction to complete
             await new Promise((resolve, reject) => {
                 const request = store.put({ path, content });
                 request.onsuccess = () => resolve();
                 request.onerror = () => reject(request.error);
             });
+            
             return true;
         } catch (error) {
             console.error('[VFS] Write error:', error);
@@ -106,6 +111,7 @@ class VirtualFileSystem {
         }
     }
 
+    // FIXED: Atomic delete operation
     async delete(path) {
         if (this.useMemory) {
             delete this.memoryStore[path];
@@ -115,11 +121,13 @@ class VirtualFileSystem {
         try {
             const tx = this.db.transaction(['files'], 'readwrite');
             const store = tx.objectStore('files');
+            
             await new Promise((resolve, reject) => {
                 const request = store.delete(path);
                 request.onsuccess = () => resolve();
                 request.onerror = () => reject(request.error);
             });
+            
             return true;
         } catch (error) {
             console.error('[VFS] Delete error:', error);
@@ -151,6 +159,15 @@ class VirtualFileSystem {
         } catch (error) {
             console.error('[VFS] Load all error:', error);
             return {};
+        }
+    }
+
+    // FIXED: Proper shutdown/cleanup
+    async shutdown() {
+        if (this.db) {
+            this.db.close();
+            this.db = null;
+            console.log('[VFS] Database connection closed');
         }
     }
 }

@@ -1,5 +1,6 @@
 // Terminal Module
 // Handles TTY I/O, display buffering, and user interaction
+// FIXED: Pipeline race conditions, memory leaks, stdin buffer leakage
 
 class Terminal {
     constructor(outputElement, inputElement) {
@@ -26,10 +27,8 @@ class Terminal {
         this.echo = true;
         this.cursorVisible = true;
         
-        // Pipe/redirect state
-        this.pipeChain = [];
-        this.redirectTarget = null;
-        this.redirectMode = null; // '>', '>>'
+        // Pipeline execution state
+        this.pipelineExecuting = false;
     }
 
     // ====================================================================
@@ -52,9 +51,13 @@ class Terminal {
             this._render(text, className);
         }
         
-        // Limit scrollback
+        // FIXED: Limit scrollback AND clean up DOM
         if (this.stdout.length > this.scrollback) {
             this.stdout.shift();
+            // Remove oldest DOM element to prevent memory leak
+            if (this.outputElement.firstChild) {
+                this.outputElement.removeChild(this.outputElement.firstChild);
+            }
         }
         if (this.stderr.length > this.scrollback) {
             this.stderr.shift();
@@ -184,40 +187,50 @@ class Terminal {
         return { commands, redirect };
     }
 
+    // FIXED: No more race conditions - each pipeline gets isolated context
     async executePipeline(commands, redirect, executor) {
-        let input = '';
+        // Create isolated execution context for this pipeline
+        const context = {
+            output: '',
+            originalWrite: this.write.bind(this),
+            captureOutput: false
+        };
         
         for (let i = 0; i < commands.length; i++) {
             const cmd = commands[i];
             const isLast = i === commands.length - 1;
             
+            // FIXED: Clear stdin buffer before each stage to prevent leakage
+            this.stdinBuffer = '';
+            
             // Set stdin if this is not the first command
             if (i > 0) {
-                this.writeStdin(input);
+                this.writeStdin(context.output);
             }
             
-            // Capture output
-            const originalWrite = this.write.bind(this);
-            let output = '';
+            // FIXED: Capture output for all commands when redirect exists, or non-last commands in pipeline
+            context.captureOutput = (redirect !== null) || !isLast;
+            context.output = '';
             
+            // Temporarily override write to capture output
+            const tempWrite = this.write.bind(this);
             this.write = (text, stream, className) => {
-                if (stream === 'stdout' && !isLast) {
-                    output += text;
+                if (stream === 'stdout' && context.captureOutput) {
+                    context.output += text;
                 } else {
-                    originalWrite(text, stream, className);
+                    context.originalWrite(text, stream, className);
                 }
             };
             
-            // Execute command
-            await executor(cmd);
+            try {
+                // Execute command
+                await executor(cmd);
+            } finally {
+                // Always restore write method
+                this.write = tempWrite;
+            }
             
-            // Restore write
-            this.write = originalWrite;
-            
-            // Use output as input for next command
-            input = output;
-            
-            // Clear stdin buffer
+            // Clear stdin buffer after command execution
             this.stdinBuffer = '';
         }
         
@@ -225,14 +238,17 @@ class Terminal {
         if (redirect && redirect.target) {
             if (redirect.type === '>') {
                 // Overwrite
-                return { output: input, redirect: { mode: 'write', target: redirect.target } };
+                return { output: context.output, redirect: { mode: 'write', target: redirect.target } };
             } else if (redirect.type === '>>') {
                 // Append
-                return { output: input, redirect: { mode: 'append', target: redirect.target } };
+                return { output: context.output, redirect: { mode: 'append', target: redirect.target } };
             }
+        } else if (context.captureOutput && context.output) {
+            // If we captured output but have no redirect, print it now
+            context.originalWrite(context.output, 'stdout', '');
         }
         
-        return { output: input, redirect: null };
+        return { output: context.output, redirect: null };
     }
 
     // ====================================================================

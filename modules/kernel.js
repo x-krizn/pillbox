@@ -1,9 +1,10 @@
 // Kernel Module
 // Core system: boot, module management, storage coordination
+// FIXED: Atomic transactions - in-memory cache only updated after successful DB write
 
 class Kernel {
     constructor() {
-        this.version = '1.0.0';
+        this.version = '1.0.1';
         this.bootLog = [];
         this.loadedModules = new Map();
         this.coreModules = new Map();
@@ -15,7 +16,7 @@ class Kernel {
         
         // Storage
         this.vfs = null;  // VFS instance
-        this.userModules = {};  // User-created modules from VFS
+        this.userModules = {};  // Kernel cache (RAM) - mirrors VFS (disk)
     }
 
     // ====================================================================
@@ -27,7 +28,8 @@ class Kernel {
             terminal = null,
             vfs = null,
             shell = null,
-            editor = null
+            editor = null,
+            network = null
         } = options;
         
         this.log('Kernel boot initiated');
@@ -42,8 +44,9 @@ class Kernel {
         }
         if (shell) this.registerCoreModule('shell', shell);
         if (editor) this.registerCoreModule('editor', editor);
+        if (network) this.registerCoreModule('network', network);
         
-        // Load VFS data
+        // Load VFS data into kernel cache
         if (this.vfs) {
             await this._loadVFS();
         }
@@ -150,7 +153,7 @@ class Kernel {
         }
 
         try {
-            // Execute module
+            // Execute module in global scope (intentional for userland dev)
             const func = new Function(content);
             func();
             
@@ -232,17 +235,19 @@ class Kernel {
     }
 
     // ====================================================================
-    // FILE OPERATIONS
+    // FILE OPERATIONS (ATOMIC TRANSACTIONS)
     // ====================================================================
 
+    // FIXED: Atomic transaction - only update cache after successful DB write
     async saveFile(path, content) {
-        this.userModules[path] = content;
-        
         if (this.useMemory) {
+            // Memory mode - no transaction needed
+            this.userModules[path] = content;
             return true;
         }
 
         try {
+            // Write to DB first
             const tx = this.db.transaction(['files'], 'readwrite');
             const store = tx.objectStore('files');
             await new Promise((resolve, reject) => {
@@ -250,21 +255,27 @@ class Kernel {
                 request.onsuccess = () => resolve();
                 request.onerror = () => reject(request.error);
             });
+            
+            // FIXED: Only update in-memory cache after successful DB write
+            this.userModules[path] = content;
+            this.log(`File saved: ${path}`);
             return true;
         } catch (error) {
-            this.log(`File save error: ${error.message}`);
+            this.log(`File save error: ${path} - ${error.message}`, 'error');
+            // In-memory cache NOT updated, so it stays consistent with DB
             return false;
         }
     }
 
+    // FIXED: Atomic transaction for delete
     async deleteFile(path) {
-        delete this.userModules[path];
-        
         if (this.useMemory) {
+            delete this.userModules[path];
             return true;
         }
 
         try {
+            // Delete from DB first
             const tx = this.db.transaction(['files'], 'readwrite');
             const store = tx.objectStore('files');
             await new Promise((resolve, reject) => {
@@ -272,9 +283,14 @@ class Kernel {
                 request.onsuccess = () => resolve();
                 request.onerror = () => reject(request.error);
             });
+            
+            // FIXED: Only remove from cache after successful DB delete
+            delete this.userModules[path];
+            this.log(`File deleted: ${path}`);
             return true;
         } catch (error) {
-            this.log(`File delete error: ${error.message}`);
+            this.log(`File delete error: ${path} - ${error.message}`, 'error');
+            // Cache NOT updated, stays consistent with DB
             return false;
         }
     }
@@ -328,8 +344,26 @@ class Kernel {
             coreModules: this.listCoreModules(),
             userModules: this.listUserModules(),
             loadedModules: this.listLoadedModules(),
-            uptime: this.booted ? Date.now() - this.bootLog[0]?.timestamp : 0
+            uptime: this.booted ? Date.now() - new Date(this.bootLog[0]?.timestamp).getTime() : 0
         };
+    }
+
+    // ====================================================================
+    // SHUTDOWN
+    // ====================================================================
+
+    async shutdown() {
+        this.log('Kernel shutdown initiated');
+        
+        // Close database connection
+        if (this.db) {
+            this.db.close();
+            this.db = null;
+            this.log('Database connection closed');
+        }
+        
+        this.booted = false;
+        this.log('Kernel shutdown complete');
     }
 }
 
