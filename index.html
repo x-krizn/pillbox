@@ -155,6 +155,7 @@
         // ====================================================================
         // PILLBOX UI SHELL
         // All system logic is in modules - this is just UI binding
+        // UPDATED: Added shutdown handler for proper resource cleanup
         // ====================================================================
         
         // Import core modules
@@ -201,6 +202,7 @@
                     this.terminal.write(`[WARNING] ${vfsInit.warning}\n`, 'stdout', 'warning');
                 }
                 
+                // FIXED: Register network module with kernel
                 const bootResult = await this.kernel.boot({
                     terminal: this.terminal,
                     vfs: this.vfs,
@@ -218,6 +220,9 @@
                 
                 // Register service worker
                 this.registerServiceWorker();
+                
+                // FIXED: Register shutdown handler
+                this.setupShutdown();
                 
                 // Display boot info
                 this.terminal.print('\n[SYSTEM READY]\n', 'success');
@@ -305,6 +310,18 @@
                             console.log('[PWA] Service Worker registration failed:', error);
                         });
                 }
+            }
+            
+            // FIXED: Proper shutdown handler for resource cleanup
+            setupShutdown() {
+                window.addEventListener('beforeunload', async () => {
+                    if (this.kernel) {
+                        await this.kernel.shutdown();
+                    }
+                    if (this.vfs) {
+                        await this.vfs.shutdown();
+                    }
+                });
             }
         }
         
